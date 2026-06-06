@@ -11,6 +11,7 @@ import gemini_media_analyzer as gma
 def make_valid_response_text() -> str:
     return json.dumps(
         {
+            "model": "hallucinated-model-name",
             "audio": {
                 "detected_languages": ["en"],
                 "transcript": [

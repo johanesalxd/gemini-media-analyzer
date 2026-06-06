@@ -319,7 +319,9 @@ def normalize_analysis_result(
     }
     candidate["media"]["path"] = candidate["media"].get("path") or str(path)
     candidate["media"]["mime_type"] = candidate["media"].get("mime_type") or mime
-    candidate["model"] = candidate.get("model") or model
+    # The requested model is known locally; do not trust/echo a model field that
+    # the model may hallucinate in its JSON response.
+    candidate["model"] = model
     result = AnalysisResult.model_validate(candidate)
     return result.model_dump(mode="json")
 
