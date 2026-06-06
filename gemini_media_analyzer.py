@@ -5,6 +5,7 @@ This tool is deliberately dumb: it transcribes and describes media, but does not
 fact-check, classify propaganda, infer intent, or decide truth.
 
 Env: GOOGLE_API_KEY (required); GEMINI_API_KEY is accepted as a fallback.
+The CLI loads a local .env file automatically when present.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ _DEFAULT_TIMEOUT_SECONDS = 300
 _POLL_INTERVAL_SECONDS = 2
 _SUPPORTED_MEDIA_PREFIXES = ("audio/", "video/", "image/")
 _SUPPORTED_EXTRA_MIME_TYPES = {"application/pdf"}
+_ENV_FILE_NAME = ".env"
 
 _OBJECTIVE_SYSTEM_INSTRUCTION = """You are a media transcription and observation engine.
 Your job is to report only what is present in the supplied media.
@@ -83,8 +85,31 @@ _BASE_SCHEMA = {
 }
 
 
+def load_dotenv(path: pathlib.Path | None = None) -> None:
+    """Load simple KEY=VALUE lines from .env without overriding the environment."""
+    env_path = path or pathlib.Path.cwd() / _ENV_FILE_NAME
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"ERROR: failed to read {env_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def get_api_key() -> str:
     """Read Gemini API key from environment or exit."""
+    load_dotenv()
     key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
         print(

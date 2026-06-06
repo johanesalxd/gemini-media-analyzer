@@ -29,10 +29,11 @@ Requires Python 3.13+ and a Gemini API key.
 
 ```bash
 uv sync
-export GOOGLE_API_KEY="..."
+cp .env.example .env
+# edit .env and set GOOGLE_API_KEY
 ```
 
-`GEMINI_API_KEY` is accepted as a fallback, but `GOOGLE_API_KEY` is preferred.
+The CLI automatically loads `.env` from the current working directory. `GOOGLE_API_KEY` is preferred; `GEMINI_API_KEY` is accepted as a fallback.
 
 ## Usage
 

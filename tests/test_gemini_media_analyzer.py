@@ -9,6 +9,7 @@ import gemini_media_analyzer as gma
 
 
 def test_get_api_key_prefers_google(monkeypatch):
+    monkeypatch.setattr(gma, "load_dotenv", lambda: None)
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
 
@@ -16,6 +17,7 @@ def test_get_api_key_prefers_google(monkeypatch):
 
 
 def test_get_api_key_accepts_gemini_fallback(monkeypatch):
+    monkeypatch.setattr(gma, "load_dotenv", lambda: None)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
 
@@ -23,6 +25,7 @@ def test_get_api_key_accepts_gemini_fallback(monkeypatch):
 
 
 def test_get_api_key_exits_when_missing(monkeypatch):
+    monkeypatch.setattr(gma, "load_dotenv", lambda: None)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
@@ -30,6 +33,21 @@ def test_get_api_key_exits_when_missing(monkeypatch):
         gma.get_api_key()
 
     assert exc.value.code == 1
+
+
+def test_load_dotenv_loads_values_without_overriding(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment\nGOOGLE_API_KEY=from-dotenv\nGEMINI_API_KEY='fallback'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_API_KEY", "from-real-env")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    gma.load_dotenv(env_file)
+
+    assert gma.os.environ["GOOGLE_API_KEY"] == "from-real-env"
+    assert gma.os.environ["GEMINI_API_KEY"] == "fallback"
 
 
 @pytest.mark.parametrize(

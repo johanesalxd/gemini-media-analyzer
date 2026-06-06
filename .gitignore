@@ -11,6 +11,7 @@ venv/
 .env
 .env.*
 *.env
+!.env.example
 *.secrets
 auth*.json
 
