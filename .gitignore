@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+*.env
+*.secrets
+auth*.json
+
+# Generated/local media artifacts
+artifacts/
+outputs/
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
