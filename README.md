@@ -61,6 +61,15 @@ uv run python gemini_media_analyzer.py analyze ./clip.mp4 \
 
 Do not put fact-checking or judgment requests in `--prompt`; the system instruction tells the model to refuse that role and stay observational.
 
+Write JSON to a file:
+
+```bash
+uv run python gemini_media_analyzer.py analyze ./clip.mp4 \
+  --output ./analysis.json
+```
+
+Uploaded Gemini Files API media is deleted by default after analysis. Use `--keep-uploaded-file` only when you explicitly need to inspect or reuse the upload.
+
 ## Output shape
 
 ```json

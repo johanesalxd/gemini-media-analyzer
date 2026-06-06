@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gemini_media_analyzer.py — objective Gemini media transcription/observation CLI.
+"""Objective Gemini media transcription/observation CLI.
 
 This tool is deliberately dumb: it transcribes and describes media, but does not
 fact-check, classify propaganda, infer intent, or decide truth.
@@ -16,8 +16,11 @@ import mimetypes
 import os
 import pathlib
 import sys
+import tempfile
 import time
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _DEFAULT_MODEL = "gemini-3.5-flash"
 _DEFAULT_TIMEOUT_SECONDS = 300
@@ -38,51 +41,93 @@ If something is uncertain, mark it as uncertain.
 Return valid JSON only, with no markdown fences.
 """
 
-_BASE_SCHEMA = {
-    "media": {
-        "path": "string",
-        "mime_type": "string",
-        "duration_seconds": "number|null if unknown",
-    },
-    "audio": {
-        "detected_languages": ["string"],
-        "transcript": [
-            {
-                "start": "HH:MM:SS or null",
-                "end": "HH:MM:SS or null",
-                "text": "verbatim speech",
-                "translation_en": "English translation or null",
-                "confidence": "high|medium|low|unknown",
-            }
-        ],
-        "unclear_segments": [
-            {
-                "timestamp": "HH:MM:SS or range",
-                "reason": "inaudible|overlap|music|other",
-                "best_effort_text": "string|null",
-            }
-        ],
-    },
-    "visual": {
-        "onscreen_text": [
-            {
-                "timestamp": "HH:MM:SS or null",
-                "text": "visible text",
-                "confidence": "high|medium|low|unknown",
-            }
-        ],
-        "scene_observations": [
-            {
-                "timestamp": "HH:MM:SS or null",
-                "description": "objective description of visible scene/event",
-            }
-        ],
-    },
-    "model_notes": {
-        "limitations": ["string"],
-        "safety_blocks": ["string"],
-    },
-}
+Confidence = Literal["high", "medium", "low", "unknown"]
+UnclearReason = Literal["inaudible", "overlap", "music", "other"]
+
+
+class GeminiMediaAnalyzerError(Exception):
+    """Base class for user-facing analyzer errors."""
+
+
+class ConfigError(GeminiMediaAnalyzerError):
+    """Configuration or environment error."""
+
+
+class MediaValidationError(GeminiMediaAnalyzerError):
+    """Invalid local media input."""
+
+
+class UploadError(GeminiMediaAnalyzerError):
+    """Gemini Files API upload or cleanup error."""
+
+
+class AnalysisError(GeminiMediaAnalyzerError):
+    """Gemini model analysis error."""
+
+
+class OutputError(GeminiMediaAnalyzerError):
+    """Output writing error."""
+
+
+class AnalyzerModel(BaseModel):
+    """Shared Pydantic settings for model output validation."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class MediaInfo(AnalyzerModel):
+    path: str
+    mime_type: str
+    duration_seconds: float | None = None
+
+
+class TranscriptSegment(AnalyzerModel):
+    start: str | None = None
+    end: str | None = None
+    text: str
+    translation_en: str | None = None
+    confidence: Confidence = "unknown"
+
+
+class UnclearSegment(AnalyzerModel):
+    timestamp: str | None = None
+    reason: UnclearReason = "other"
+    best_effort_text: str | None = None
+
+
+class AudioInfo(AnalyzerModel):
+    detected_languages: list[str] = Field(default_factory=list)
+    transcript: list[TranscriptSegment] = Field(default_factory=list)
+    unclear_segments: list[UnclearSegment] = Field(default_factory=list)
+
+
+class OnscreenText(AnalyzerModel):
+    timestamp: str | None = None
+    text: str
+    confidence: Confidence = "unknown"
+
+
+class SceneObservation(AnalyzerModel):
+    timestamp: str | None = None
+    description: str
+
+
+class VisualInfo(AnalyzerModel):
+    onscreen_text: list[OnscreenText] = Field(default_factory=list)
+    scene_observations: list[SceneObservation] = Field(default_factory=list)
+
+
+class ModelNotes(AnalyzerModel):
+    limitations: list[str] = Field(default_factory=list)
+    safety_blocks: list[str] = Field(default_factory=list)
+
+
+class AnalysisResult(AnalyzerModel):
+    media: MediaInfo
+    audio: AudioInfo = Field(default_factory=AudioInfo)
+    visual: VisualInfo = Field(default_factory=VisualInfo)
+    model_notes: ModelNotes = Field(default_factory=ModelNotes)
+    model: str
 
 
 def load_dotenv(path: pathlib.Path | None = None) -> None:
@@ -93,8 +138,7 @@ def load_dotenv(path: pathlib.Path | None = None) -> None:
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
-        print(f"ERROR: failed to read {env_path}: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigError(f"failed to read {env_path}: {exc}") from exc
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -108,16 +152,14 @@ def load_dotenv(path: pathlib.Path | None = None) -> None:
 
 
 def get_api_key() -> str:
-    """Read Gemini API key from environment or exit."""
+    """Read Gemini API key from environment."""
     load_dotenv()
     key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
-        print(
-            "ERROR: GOOGLE_API_KEY environment variable not set "
-            "(GEMINI_API_KEY fallback also empty)",
-            file=sys.stderr,
+        raise ConfigError(
+            "GOOGLE_API_KEY environment variable not set "
+            "(GEMINI_API_KEY fallback also empty)"
         )
-        sys.exit(1)
     return key
 
 
@@ -138,12 +180,17 @@ def validate_media_path(file_path: str) -> pathlib.Path:
     """Resolve and validate a local media path."""
     path = pathlib.Path(file_path).expanduser().resolve()
     if not path.exists():
-        print(f"ERROR: media path does not exist: {file_path}", file=sys.stderr)
-        sys.exit(1)
+        raise MediaValidationError(f"media path does not exist: {file_path}")
     if not path.is_file():
-        print(f"ERROR: media path is not a file: {file_path}", file=sys.stderr)
-        sys.exit(1)
+        raise MediaValidationError(f"media path is not a file: {file_path}")
     return path
+
+
+def validate_timeout_seconds(timeout_seconds: int) -> int:
+    """Return timeout when positive, otherwise raise."""
+    if timeout_seconds <= 0:
+        raise MediaValidationError("--timeout-seconds must be greater than 0")
+    return timeout_seconds
 
 
 def is_supported_mime(mime: str) -> bool:
@@ -163,6 +210,7 @@ def normalize_state(state: Any) -> str:
 
 def upload_media(client, path: pathlib.Path, mime: str, timeout_seconds: int):
     """Upload media to Gemini Files API and wait until ACTIVE."""
+    timeout_seconds = validate_timeout_seconds(timeout_seconds)
     try:
         file_obj = client.files.upload(file=str(path), config={"mime_type": mime})
         waited = 0
@@ -172,30 +220,33 @@ def upload_media(client, path: pathlib.Path, mime: str, timeout_seconds: int):
             if state == "ACTIVE":
                 return latest
             if state in {"FAILED", "ERROR"}:
-                print(
-                    f"ERROR: media upload processing failed: state={state}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                raise UploadError(f"media upload processing failed: state={state}")
             if waited >= timeout_seconds:
-                print(
-                    "ERROR: media upload did not become ACTIVE within "
-                    f"{timeout_seconds}s; file={file_obj.name}",
-                    file=sys.stderr,
+                raise UploadError(
+                    "media upload did not become ACTIVE within "
+                    f"{timeout_seconds}s; file={file_obj.name}"
                 )
-                sys.exit(1)
             time.sleep(_POLL_INTERVAL_SECONDS)
             waited += _POLL_INTERVAL_SECONDS
-    except SystemExit:
+    except GeminiMediaAnalyzerError:
         raise
     except Exception as exc:
-        print(f"ERROR: failed to upload media: {exc}", file=sys.stderr)
-        sys.exit(1)
+        raise UploadError(f"failed to upload media: {exc}") from exc
+
+
+def delete_uploaded_file(client, uploaded_file) -> None:
+    """Delete a Gemini Files API upload."""
+    name = getattr(uploaded_file, "name", None)
+    if not name:
+        raise UploadError("uploaded file has no name; cannot delete it")
+    try:
+        client.files.delete(name=name)
+    except Exception as exc:
+        raise UploadError(f"failed to delete uploaded file {name}: {exc}") from exc
 
 
 def build_prompt(path: pathlib.Path, mime: str, user_prompt: str | None) -> str:
     """Build objective media-analysis prompt."""
-    schema = json.dumps(_BASE_SCHEMA, indent=2)
     extra = f"\nAdditional user request: {user_prompt}\n" if user_prompt else ""
     return f"""Analyze this media file objectively.
 
@@ -211,8 +262,7 @@ Required behavior:
 - Do not use external sources.
 - Use null/empty arrays when a field is not applicable or cannot be determined.
 {extra}
-Return JSON matching this shape:
-{schema}
+Return JSON matching the configured response schema.
 """
 
 
@@ -250,6 +300,77 @@ def parse_json_response(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def normalize_analysis_result(
+    parsed: dict[str, Any],
+    *,
+    path: pathlib.Path,
+    mime: str,
+    model: str,
+) -> dict[str, Any]:
+    """Validate and normalize model output."""
+    candidate = dict(parsed)
+    media = candidate.get("media")
+    if not isinstance(media, dict):
+        media = {}
+    candidate["media"] = {
+        "path": str(path),
+        "mime_type": mime,
+        **media,
+    }
+    candidate["media"]["path"] = candidate["media"].get("path") or str(path)
+    candidate["media"]["mime_type"] = candidate["media"].get("mime_type") or mime
+    # The requested model is known locally; do not trust/echo a model field that
+    # the model may hallucinate in its JSON response.
+    candidate["model"] = model
+    result = AnalysisResult.model_validate(candidate)
+    return result.model_dump(mode="json")
+
+
+def fallback_result(
+    *,
+    path: pathlib.Path,
+    mime: str,
+    model: str,
+    raw_text: str,
+    parse_error: str | None = None,
+    validation_error: str | None = None,
+) -> dict[str, Any]:
+    """Build a structured fallback for malformed model responses."""
+    return {
+        "media": {"path": str(path), "mime_type": mime, "duration_seconds": None},
+        "audio": {"detected_languages": [], "transcript": [], "unclear_segments": []},
+        "visual": {"onscreen_text": [], "scene_observations": []},
+        "model_notes": {"limitations": [], "safety_blocks": []},
+        "model": model,
+        "raw_text": raw_text,
+        "parse_error": parse_error,
+        "validation_error": validation_error,
+    }
+
+
+def write_json_output(result: dict[str, Any], output_path: str) -> None:
+    """Atomically write JSON output to a local path."""
+    path = pathlib.Path(output_path).expanduser()
+    directory = path.parent if path.parent != pathlib.Path("") else pathlib.Path.cwd()
+    if not directory.exists():
+        raise OutputError(f"output directory does not exist: {directory}")
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=directory,
+            delete=False,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as temp_file:
+            temp_file.write(json.dumps(result, indent=2, ensure_ascii=False))
+            temp_file.write("\n")
+            temp_name = temp_file.name
+        pathlib.Path(temp_name).replace(path)
+    except OSError as exc:
+        raise OutputError(f"failed to write output JSON to {path}: {exc}") from exc
+
+
 def analyze_media(
     media_path: str,
     *,
@@ -257,55 +378,86 @@ def analyze_media(
     prompt: str | None = None,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
     as_json: bool = False,
+    output_path: str | None = None,
+    keep_uploaded_file: bool = False,
 ) -> dict[str, Any]:
     """Upload and objectively analyze audio/video/image media."""
     path = validate_media_path(media_path)
+    validate_timeout_seconds(timeout_seconds)
     mime = detect_mime(path)
     if not is_supported_mime(mime):
-        print(f"ERROR: unsupported media MIME type: {mime}", file=sys.stderr)
-        sys.exit(1)
+        raise MediaValidationError(f"unsupported media MIME type: {mime}")
 
     key = get_api_key()
     client = make_client(key)
-    uploaded = upload_media(client, path, mime, timeout_seconds)
+    uploaded = None
+    operation_error: GeminiMediaAnalyzerError | None = None
+    result: dict[str, Any] | None = None
 
     from google.genai import types
 
-    contents = [
-        types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime),
-        build_prompt(path, mime, prompt),
-    ]
-    config = types.GenerateContentConfig(
-        system_instruction=_OBJECTIVE_SYSTEM_INSTRUCTION,
-        response_mime_type="application/json",
-    )
-
     try:
+        uploaded = upload_media(client, path, mime, timeout_seconds)
+        contents = [
+            types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime),
+            build_prompt(path, mime, prompt),
+        ]
+        config = types.GenerateContentConfig(
+            system_instruction=_OBJECTIVE_SYSTEM_INSTRUCTION,
+            response_mime_type="application/json",
+            response_json_schema=AnalysisResult.model_json_schema(),
+        )
+
         response = client.models.generate_content(
             model=model,
             contents=contents,
             config=config,
         )
+
+        raw_text = extract_response_text(response)
+        parsed = parse_json_response(raw_text)
+        if parsed is None:
+            result = fallback_result(
+                path=path,
+                mime=mime,
+                model=model,
+                raw_text=raw_text,
+                parse_error="model response was not valid JSON object",
+            )
+        else:
+            try:
+                result = normalize_analysis_result(
+                    parsed,
+                    path=path,
+                    mime=mime,
+                    model=model,
+                )
+            except ValidationError as exc:
+                result = fallback_result(
+                    path=path,
+                    mime=mime,
+                    model=model,
+                    raw_text=raw_text,
+                    validation_error=str(exc),
+                )
+    except GeminiMediaAnalyzerError as exc:
+        operation_error = exc
     except Exception as exc:
-        print(f"ERROR: Gemini media analysis failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        operation_error = AnalysisError(f"Gemini media analysis failed: {exc}")
+    finally:
+        if uploaded is not None and not keep_uploaded_file:
+            try:
+                delete_uploaded_file(client, uploaded)
+            except UploadError as exc:
+                if operation_error is None:
+                    operation_error = exc
 
-    raw_text = extract_response_text(response)
-    parsed = parse_json_response(raw_text)
-    if parsed is None:
-        result: dict[str, Any] = {
-            "media": {"path": str(path), "mime_type": mime, "duration_seconds": None},
-            "model": model,
-            "raw_text": raw_text,
-            "parse_error": "model response was not valid JSON",
-        }
-    else:
-        result = parsed
-        result.setdefault("media", {})
-        result["media"].setdefault("path", str(path))
-        result["media"].setdefault("mime_type", mime)
-        result.setdefault("model", model)
-
+    if operation_error is not None:
+        raise operation_error
+    if result is None:
+        raise AnalysisError("Gemini media analysis did not produce a result")
+    if output_path:
+        write_json_output(result, output_path)
     if as_json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -379,6 +531,12 @@ def main() -> None:
         help="Additional objective transcription/observation request; no fact-checking",
     )
     analyze.add_argument("--json", action="store_true", help="Print JSON output")
+    analyze.add_argument("--output", help="Write JSON output to this path")
+    analyze.add_argument(
+        "--keep-uploaded-file",
+        action="store_true",
+        help="Do not delete the Gemini Files API upload after analysis",
+    )
     analyze.add_argument(
         "--timeout-seconds",
         type=int,
@@ -387,16 +545,22 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    if args.command == "analyze":
-        analyze_media(
-            args.media_path,
-            model=args.model,
-            prompt=args.prompt,
-            timeout_seconds=args.timeout_seconds,
-            as_json=args.json,
-        )
-    else:  # pragma: no cover - argparse prevents this
-        parser.error(f"unknown command: {args.command}")
+    try:
+        if args.command == "analyze":
+            analyze_media(
+                args.media_path,
+                model=args.model,
+                prompt=args.prompt,
+                timeout_seconds=args.timeout_seconds,
+                as_json=args.json,
+                output_path=args.output,
+                keep_uploaded_file=args.keep_uploaded_file,
+            )
+        else:  # pragma: no cover - argparse prevents this
+            parser.error(f"unknown command: {args.command}")
+    except GeminiMediaAnalyzerError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
