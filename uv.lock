@@ -211,6 +211,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "google-genai" },
+    { name = "pydantic" },
 ]
 
 [package.dev-dependencies]
@@ -221,7 +222,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "google-genai", specifier = ">=2.0.0" }]
+requires-dist = [
+    { name = "google-genai", specifier = ">=2.0.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+]
 
 [package.metadata.requires-dev]
 dev = [
